@@ -10,11 +10,14 @@ from transformers import AutoTokenizer, AutoModel
 import torch
 import PyPDF2
 import tempfile
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
+import requests
 
 
 app = Flask(__name__)
 
-
+CORS(app)
     
 def mean_pooling(model_output, attention_mask):
     token_embeddings = model_output[0]
@@ -64,6 +67,19 @@ def preprocess_text(text_to_clean):
     cleaned_text = cleaned_text.strip()
 
     return cleaned_text
+
+
+def parsing(path, text):
+    nlp = spacy.load(path)
+    doc = nlp(text)
+    print(doc.ents)
+    entity_dict = {}
+    for ent in doc.ents:
+        if ent.label_ in entity_dict:
+            entity_dict[ent.label_].append(ent.text)
+        else:
+            entity_dict[ent.label_] = [ent.text]
+    return entity_dict
 
 def extract_text_from_pdf(pdf_file_path):
     text = ""
@@ -126,7 +142,7 @@ def parse_resume():
             resume_text = extract_text_from_pdf(file_path)
 
             # Rest of your code
-            nlp = spacy.load('./RankingAssets/CV_output_model/model-best')
+            nlp = spacy.load('C:/RankerModels/CV_output_model/model-best')
 
             doc = nlp(resume_text)
             print(doc.ents)
@@ -137,7 +153,7 @@ def parse_resume():
                     entity_dict[ent.label_].append(ent.text)
                 else:
                     entity_dict[ent.label_] = [ent.text]
-
+            print(entity_dict)
             return jsonify({
                 'Domain': jobClassification(resume_text),
                 'entities': entity_dict
@@ -170,7 +186,7 @@ def parse_jd():
             job_text = extract_text_from_pdf(file_path)
 
             # Rest of your code
-            nlp = spacy.load('./RankingAssets/jd_train_output_model/model-best')
+            nlp = spacy.load('C:/RankerModels/jd_train_output_model/model-best')
 
             doc = nlp(job_text)
             print(doc.ents)
@@ -224,41 +240,54 @@ def job_classifier():
         return jsonify({'error': str(e)}), 500
 
 
-
-@app.route('/matchingscore', methods=['POST'])
-def jobMatchingScore():
+@app.route('/matchingscore_latest', methods=['POST'])
+def jobMatchingScore_latest():
     try:
         # Check if both resume and job description PDF files are provided in the request
-        if 'resume_pdf' not in request.files or 'jobdesc_pdf' not in request.files:
-            return jsonify({'error': 'Both resume and job description PDF files are required'}), 400
+        if 'resume_pdf' not in request.files or 'jobdesc_pdf_url' not in request.form:
+            return jsonify({'error': 'Both resume PDF file and job description PDF URL are required'}), 400
 
         resume_pdf = request.files['resume_pdf']
-        jobdesc_pdf = request.files['jobdesc_pdf']
+        jobdesc_pdf_url = request.form['jobdesc_pdf_url']
 
-        if resume_pdf.filename == '' or jobdesc_pdf.filename == '':
-            return jsonify({'error': 'No selected file for either resume or job description'}), 400
+        if resume_pdf.filename == '' or not jobdesc_pdf_url:
+            return jsonify({'error': 'No selected file for either resume or job description PDF URL'}), 400
 
-        if resume_pdf.filename.endswith('.pdf') and jobdesc_pdf.filename.endswith('.pdf'):
+        if resume_pdf.filename.endswith('.pdf'):
+            # Download the job description PDF file from the provided URL
+            jobdesc_response = requests.get(jobdesc_pdf_url)
+            if jobdesc_response.status_code != 200:
+                return jsonify({'error': f'Failed to download job description PDF file from the provided URL: {jobdesc_response.status_code}'}), 400
+            
             # Extract text from the resume and job description PDF files
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file1, tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file2:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file1, \
+                    tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file2:
                 resume_pdf.save(tmp_file1.name)
-                jobdesc_pdf.save(tmp_file2.name)
+                tmp_file2.write(jobdesc_response.content)
+                tmp_file2.seek(0)  # Reset file pointer to the beginning
                 resume_text = extract_text_from_pdf(tmp_file1.name)
                 jobdesc_text = extract_text_from_pdf(tmp_file2.name)
 
             # Calculate similarity score between the resume and job description texts (using your calculate_similarity function)
-            similarity_scores = calculate_similarity(model,resume_text, jobdesc_text)
-            print(similarity_scores)
+                clean_res=preprocess_text(resume_text)
+                clean_jd=preprocess_text(jobdesc_text)
 
-            return jsonify({'score': similarity_scores[0] * 100})
+                parsedRes= parsing("C:/RankerModels/CV_output_model/model-best",clean_res)
+                parsedjd= parsing("C:/RankerModels/jd_train_output_model/model-best",clean_jd)
+            similarity_scores = calculate_similarity(model, str(parsedRes), str(parsedjd))
+            print(similarity_scores)
+            resume_domain=jobClassification(resume_text)
+
+            return jsonify({
+                'score': similarity_scores[0] * 100,
+                "predicted_domain":resume_domain
+                })
 
         else:
-            return jsonify({'error': 'Uploaded files must be in PDF format'}), 400
+            return jsonify({'error': 'Uploaded resume file must be in PDF format'}), 400
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-
 
 # main driver function
 if __name__ == '__main__':
